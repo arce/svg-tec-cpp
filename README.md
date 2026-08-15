@@ -8,8 +8,8 @@ This is an educational project, built for learning purposes. Each shape owns its
 
 ## Features
 
-- Shapes: `Rectangle`, `Circle`, `Ellipse`, `Line`, `Polyline`, `Polygon`, `QuadCurve`, `CubicCurve`, `Text`, `Group`
-- Curves (`QuadCurve`, `CubicCurve`) are sampled into `<polyline>` points, no `<path>` element involved
+- Shapes: `Rectangle`, `Circle`, `Ellipse`, `Line`, `Polyline`, `Polygon`, `Wedge`, `QuadCurve`, `CubicCurve`, `Text`, `Group`
+- Curves (`QuadCurve`, `CubicCurve`) and `Wedge` are sampled into `<polyline>`/`<polygon>` points, no `<path>` element involved
 - Every shape owns its own style (fill, stroke, transform) instead of relying on a mutable drawing context
 - Fluent, chainable API: `doc.rect(10,20,30,40).fill("#ff0000").stroke("#000000").stroke(2.0);`
 - `Group` and `Svg` share the same shape-creation methods (both inherit from `ShapeContainer`), so nesting groups works the same way as the top-level document
@@ -68,6 +68,7 @@ g++ -std=c++17 -o example example.cpp
 | `.line(x1, y1, x2, y2)` | Adds a `Line` |
 | `.polyline(points)` | Adds a `Polyline` from a vector of `{x,y}` points |
 | `.polygon(points)` | Adds a closed `Polygon` from a vector of `{x,y}` points |
+| `.wedge(x, y, r1, r2, a1, a2)` | Adds a `Wedge`: the annular sector centered at `(x,y)` between radii `r1` and `r2`, swept from angle `a1` to `a2` (degrees, 0° = +x axis, increasing clockwise). Pass `r1 = 0` for a plain pie slice |
 | `.quadCurve(x1, y1, cx, cy, x2, y2)` | Adds a quadratic Bezier curve, sampled into a `Polyline` |
 | `.cubicCurve(x1, y1, cx1, cy1, cx2, cy2, x2, y2)` | Adds a cubic Bezier curve, sampled into a `Polyline` |
 | `.text(x, y, content)` | Adds a `Text` element |

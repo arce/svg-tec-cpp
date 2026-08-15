@@ -16,6 +16,8 @@ namespace SVG {
 
 using Points = std::vector<std::pair<double, double>>;
 
+constexpr double PI = 3.14159265358979323846;
+
 struct Color {
   int r, g, b;
   Color(int r = 0, int g = 0, int b = 0) : r(r), g(g), b(b) {}
@@ -218,6 +220,27 @@ public:
   std::string toSVG() const override { return tag("polygon", pointsAttr()); }
 };
 
+class Wedge : public Polygon {
+public:
+  Wedge(double x, double y, double r1, double r2, double a1, double a2, int segments = 48) {
+    fill(Color(0, 0, 0));
+    double rad1 = a1 * PI / 180.0;
+    double rad2 = a2 * PI / 180.0;
+    for (int i = 0; i <= segments; ++i) {
+      double a = rad1 + (rad2 - rad1) * (static_cast<double>(i) / segments);
+      addPoint(x + r2 * std::cos(a), y + r2 * std::sin(a));
+    }
+    if (r1 == 0) {
+      addPoint(x, y);
+    } else {
+      for (int i = segments; i >= 0; --i) {
+        double a = rad1 + (rad2 - rad1) * (static_cast<double>(i) / segments);
+        addPoint(x + r1 * std::cos(a), y + r1 * std::sin(a));
+      }
+    }
+  }
+};
+
 class QuadCurve : public Polyline {
 public:
   QuadCurve(double x1, double y1, double cx, double cy, double x2, double y2, int segments = 32) {
@@ -283,6 +306,7 @@ public:
   Line& line(double x1, double y1, double x2, double y2) { return create<Line>(x1, y1, x2, y2); }
   Polyline& polyline(const Points& pts) { return create<Polyline>(pts); }
   Polygon& polygon(const Points& pts) { return create<Polygon>(pts); }
+  Wedge& wedge(double x, double y, double r1, double r2, double a1, double a2) { return create<Wedge>(x, y, r1, r2, a1, a2); }
   QuadCurve& quadCurve(double x1, double y1, double cx, double cy, double x2, double y2) { return create<QuadCurve>(x1, y1, cx, cy, x2, y2); }
   CubicCurve& cubicCurve(double x1, double y1, double cx1, double cy1, double cx2, double cy2, double x2, double y2) { return create<CubicCurve>(x1, y1, cx1, cy1, cx2, cy2, x2, y2); }
   Text& text(double x, double y, const std::string& t) { return create<Text>(x, y, t); }

@@ -12,6 +12,7 @@ int main() {
   doc.text(50, 250, "Hello SVG Library").font("Arial", 24).fill("#323232");
   doc.polyline({{50, 320}, {90, 280}, {130, 320}, {170, 280}, {210, 320}}).stroke("#000080").stroke(2.0);
   doc.polygon({{300, 280}, {340, 280}, {360, 320}, {320, 350}, {280, 320}}).fill("#ffd700").stroke("#8b4513").stroke(2.0);
+  doc.wedge(720, 100, 25, 55, -60, 60).fill("#ff69b4").stroke("#000000").stroke(1.5);
   doc.quadCurve(420, 350, 470, 260, 520, 350).stroke("#dc143c").stroke(2.5);
   doc.cubicCurve(560, 350, 590, 260, 650, 260, 680, 350).stroke("#1e90ff").stroke(2.5);
 
