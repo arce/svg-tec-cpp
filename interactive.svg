@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="220">
+<style>
+  @keyframes latido {
+    0%   { transform: scale(1);    }
+    50%  { transform: scale(1.15); }
+    100% { transform: scale(1);    }
+  }
+  @keyframes flotar {
+    0%   { transform: translateY(0);    }
+    50%  { transform: translateY(-6px); }
+    100% { transform: translateY(0);    }
+  }
+  .boton { transition: fill, transform 0.3s ease; }
+  .boton:hover { fill: #2ecc71; transform: translateY(-3px); cursor: pointer; }
+  .boton:active { fill: #27ae60; }
+  .latiendo { animation: latido 1.2s ease-in-out infinite; }
+  .latiendo { transform-origin: 110px 90px; }
+  .titulo { animation: flotar 2s ease-in-out infinite 0.2s; }
+</style>
+  <circle cx="110" cy="90" r="40" class="latiendo" fill="#e74c3c"/>
+  <rect x="70" y="160" width="80" height="25" rx="6" ry="6" class="boton" fill="#3498db"/>
+  <text x="110" y="45" font-family="sans-serif" font-size="14" class="titulo" fill="#ffffff">SVG + CSS</text>
+</svg>

@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <fstream>
+#include <map>
 
 namespace SVG {
 
@@ -18,6 +19,9 @@ using Points = std::vector<std::pair<double, double>>;
 
 constexpr double PI = 3.14159265358979323846;
 
+// ---------------------------------------------------------------------------
+// Color
+// ---------------------------------------------------------------------------
 struct Color {
   int r, g, b;
   Color(int r = 0, int g = 0, int b = 0) : r(r), g(g), b(b) {}
@@ -43,6 +47,9 @@ struct Color {
   }
 };
 
+// ---------------------------------------------------------------------------
+// Stroke
+// ---------------------------------------------------------------------------
 struct Stroke {
   double width{1.0};
   std::string dashArray{};
@@ -50,52 +57,45 @@ struct Stroke {
   std::string toString() const {
     std::stringstream ss;
     ss << "stroke-width=\"" << width << "\" ";
-    if (!dashArray.empty()) {
-      ss << "stroke-dasharray=\"" << dashArray << "\" ";
-    }
-    if (!cap.empty()) {
-      ss << "stroke-linecap=\"" << cap << "\" ";
-    }
+    if (!dashArray.empty()) ss << "stroke-dasharray=\"" << dashArray << "\" ";
+    if (!cap.empty()) ss << "stroke-linecap=\"" << cap << "\" ";
     return ss.str();
   }
 };
 
+// ---------------------------------------------------------------------------
+// Transform
+// ---------------------------------------------------------------------------
 struct Transform {
   std::string value;
   Transform() = default;
   Transform(const std::string& v) : value(v) {}
   static Transform translate(double x, double y) {
-    std::stringstream ss;
-    ss << "translate(" << x << "," << y << ")";
-    return Transform(ss.str());
+    std::stringstream ss; ss << "translate(" << x << "," << y << ")"; return Transform(ss.str());
   }
   static Transform scale(double sx, double sy) {
-    std::stringstream ss;
-    ss << "scale(" << sx << "," << sy << ")";
-    return Transform(ss.str());
+    std::stringstream ss; ss << "scale(" << sx << "," << sy << ")"; return Transform(ss.str());
   }
   static Transform rotate(double angle, double cx = 0, double cy = 0) {
-    std::stringstream ss;
-    ss << "rotate(" << angle;
+    std::stringstream ss; ss << "rotate(" << angle;
     if (cx != 0 || cy != 0) ss << "," << cx << "," << cy;
-    ss << ")";
-    return Transform(ss.str());
+    ss << ")"; return Transform(ss.str());
   }
-  static Transform skewX(double angle) {
-    std::stringstream ss;
-    ss << "skewX(" << angle << ")";
-    return Transform(ss.str());
-  }
-  static Transform skewY(double angle) {
-    std::stringstream ss;
-    ss << "skewY(" << angle << ")";
-    return Transform(ss.str());
-  }
+  static Transform skewX(double angle) { std::stringstream ss; ss << "skewX(" << angle << ")"; return Transform(ss.str()); }
+  static Transform skewY(double angle) { std::stringstream ss; ss << "skewY(" << angle << ")"; return Transform(ss.str()); }
   Transform combine(const Transform& t) const { return Transform(value + " " + t.value); }
   std::string toString() const { return value; }
 };
 
+class Shape;
+class ShapeContainer;
+class Group;
+
+// ---------------------------------------------------------------------------
+// Shape
+// ---------------------------------------------------------------------------
 class Shape {
+  friend class ShapeContainer;
 protected:
   Color fillColor;
   Color strokeColor;
@@ -104,15 +104,33 @@ protected:
   Stroke strokeStyle;
   std::string xform;
 
-  std::string tag(const std::string& name, const std::string& attrs, bool useFill = true, bool useStroke = true, const std::string& body = "") const {
+  std::string cssClass;
+  std::string idAttr;
+
+  mutable std::vector<std::string> pendingRules;
+
+  std::string tag(const std::string& name, const std::string& attrs, bool useFill = true,
+                  bool useStroke = true, const std::string& body = "") const {
     std::stringstream ss;
     ss << "<" << name << attrs;
+    if (!idAttr.empty())   ss << " id=\""    << idAttr   << "\"";
+    if (!cssClass.empty()) ss << " class=\"" << cssClass << "\"";
     if (useFill) ss << (hasFill ? " fill=\"" + fillColor.toHex() + "\"" : " fill=\"none\"");
     if (useStroke && hasStroke) ss << " stroke=\"" << strokeColor.toHex() << "\" " << strokeStyle.toString();
     if (!xform.empty()) ss << " transform=\"" << xform << "\"";
     if (body.empty()) ss << "/>"; else ss << ">" << body << "</" << name << ">";
     return ss.str();
   }
+
+  void addClassDeclaration(const std::string& declarations) const {
+    std::string cls = cssClass;
+    if (cls.empty()) {
+      cls = "s" + std::to_string(reinterpret_cast<std::uintptr_t>(this));
+      const_cast<Shape*>(this)->cssClass = cls;
+    }
+    pendingRules.push_back("." + cls + " { " + declarations + " }");
+  }
+
 public:
   virtual ~Shape() = default;
 
@@ -122,6 +140,7 @@ public:
   Shape& stroke(double width, const std::string& dashArray = "") { strokeStyle = Stroke{width, dashArray}; hasStroke = true; return *this; }
   Shape& noStroke() { hasStroke = false; return *this; }
   Shape& cap(const std::string& c) { strokeStyle.cap = c; hasStroke = true; return *this; }
+
   Shape& transform(const std::string& t) { xform = t; return *this; }
   Shape& transform(const Transform& t) { return transform(t.toString()); }
   Shape& addTransform(const Transform& t) { return transform(xform.empty() ? t.toString() : xform + " " + t.toString()); }
@@ -131,7 +150,79 @@ public:
   Shape& skewX(double angle) { return addTransform(Transform::skewX(angle)); }
   Shape& skewY(double angle) { return addTransform(Transform::skewY(angle)); }
 
+  Shape& className(const std::string& c) { cssClass = c; return *this; }
+  Shape& idName(const std::string& i)    { idAttr = i;   return *this; }
+  const std::string& getClass() const    { return cssClass; }
+  const std::string& getId() const       { return idAttr;   }
+
+  Shape& cssOpacity(double o) {
+    std::stringstream ss; ss << "opacity: " << o << ";";
+    addClassDeclaration(ss.str());
+    return *this;
+  }
+
+  Shape& transition(const std::string& properties, double seconds,
+                    const std::string& timing = "ease", double delay = 0) {
+    std::stringstream ss;
+    ss << "transition: " << properties << " " << seconds << "s " << timing;
+    if (delay > 0) ss << " " << delay << "s";
+    ss << ";";
+    addClassDeclaration(ss.str());
+    return *this;
+  }
+
+  Shape& cssTransform(const std::string& expr) {
+    addClassDeclaration("transform: " + expr + ";");
+    return *this;
+  }
+
+  Shape& cssTransformOrigin(double x, double y) {
+    std::stringstream ss;
+    ss << "transform-origin: " << x << "px " << y << "px;";
+    addClassDeclaration(ss.str());
+    return *this;
+  }
+
+  Shape& css(const std::string& declarations) {
+    addClassDeclaration(declarations);
+    return *this;
+  }
+
+  Shape& animate(const std::string& keyframeName,
+                 double duration,
+                 const std::string& timing = "ease",
+                 const std::string& iteration = "infinite",
+                 double delay = 0,
+                 const std::string& direction = "",
+                 const std::string& fillMode = "") {
+    std::stringstream ss;
+    ss << "animation: " << keyframeName << " " << duration << "s " << timing
+       << " " << iteration;
+    if (delay > 0)        ss << " " << delay << "s";
+    if (!direction.empty()) ss << " " << direction;
+    if (!fillMode.empty())  ss << " " << fillMode;
+    ss << ";";
+    addClassDeclaration(ss.str());
+    return *this;
+  }
+
+  Shape& animateTransform(const std::string& keyframeName,
+                          double duration,
+                          const std::string& timing = "ease",
+                          const std::string& iteration = "infinite") {
+    return animate(keyframeName, duration, timing, iteration);
+  }
+
   virtual std::string toSVG() const = 0;
+  virtual void collectStyles(std::vector<std::string>& out) const {
+    for (const auto& r : pendingRules) out.push_back(r);
+  }
+
+  static std::string sel(const std::string& cls)   { return "." + cls; }
+  static std::string id (const std::string& ident) { return "#" + ident; }
+  static std::string hover (const std::string& s)  { return s + ":hover";  }
+  static std::string active(const std::string& s)  { return s + ":active"; }
+  static std::string focus (const std::string& s)  { return s + ":focus";  }
 };
 
 class Rectangle : public Shape {
@@ -154,7 +245,6 @@ private:
   double cx, cy, r;
 public:
   Circle(double cx, double cy, double r) : cx(cx), cy(cy), r(r) {}
-
   std::string toSVG() const override {
     std::stringstream a;
     a << " cx=\"" << cx << "\" cy=\"" << cy << "\" r=\"" << r << "\"";
@@ -167,7 +257,6 @@ private:
   double cx, cy, rx, ry;
 public:
   Ellipse(double cx, double cy, double rx, double ry) : cx(cx), cy(cy), rx(rx), ry(ry) {}
-
   std::string toSVG() const override {
     std::stringstream a;
     a << " cx=\"" << cx << "\" cy=\"" << cy << "\" rx=\"" << rx << "\" ry=\"" << ry << "\"";
@@ -182,7 +271,6 @@ public:
   Line(double x1, double y1, double x2, double y2) : x1(x1), y1(y1), x2(x2), y2(y2) {
     stroke(Color(0, 0, 0));
   }
-
   std::string toSVG() const override {
     std::stringstream a;
     a << " x1=\"" << x1 << "\" y1=\"" << y1 << "\" x2=\"" << x2 << "\" y2=\"" << y2 << "\"";
@@ -193,7 +281,6 @@ public:
 class Polyline : public Shape {
 protected:
   Points points;
-
   std::string pointsAttr() const {
     std::stringstream ss;
     ss << " points=\"";
@@ -208,7 +295,6 @@ public:
   Polyline() { noFill(); }
   Polyline(const Points& pts) : points(pts) { noFill(); }
   void addPoint(double x, double y) { points.emplace_back(x, y); }
-
   std::string toSVG() const override { return tag("polyline", pointsAttr()); }
 };
 
@@ -216,7 +302,6 @@ class Polygon : public Polyline {
 public:
   Polygon() { fill(Color(0, 0, 0)); }
   Polygon(const Points& pts) : Polyline(pts) { fill(Color(0, 0, 0)); }
-
   std::string toSVG() const override { return tag("polygon", pointsAttr()); }
 };
 
@@ -273,9 +358,7 @@ private:
   double fontSize;
 public:
   Text(double x, double y, const std::string& text) : x(x), y(y), text(text), fontSize(12) {}
-
   Text& font(const std::string& family, double size) { fontFamily = family; fontSize = size; return *this; }
-
   std::string toSVG() const override {
     std::stringstream a;
     a << " x=\"" << x << "\" y=\"" << y << "\"";
@@ -285,12 +368,24 @@ public:
   }
 };
 
-class Group;
-
+// ---------------------------------------------------------------------------
+// ShapeContainer
+// ---------------------------------------------------------------------------
 class ShapeContainer {
 protected:
   std::vector<std::shared_ptr<Shape>> shapes;
+  std::vector<std::string> styleRules;
+  std::vector<std::string> keyframeBlocks;
+  bool hasKeyframes(const std::string& name) const {
+    for (const auto& k : keyframeBlocks) {
+      if (k.find("@keyframes " + name) != std::string::npos) return true;
+    }
+    return false;
+  }
+
 public:
+  virtual ~ShapeContainer() = default;
+
   template <typename ShapeT, typename... Args>
   ShapeT& create(Args&&... args) {
     auto s = std::make_shared<ShapeT>(std::forward<Args>(args)...);
@@ -301,18 +396,78 @@ public:
   ShapeContainer& add(std::shared_ptr<Shape> shape) { shapes.push_back(shape); return *this; }
 
   Rectangle& rect(double x, double y, double w, double h, double rx = 0) { return create<Rectangle>(x, y, w, h, rx); }
-  Circle& circle(double cx, double cy, double r) { return create<Circle>(cx, cy, r); }
-  Ellipse& ellipse(double cx, double cy, double rx, double ry) { return create<Ellipse>(cx, cy, rx, ry); }
-  Line& line(double x1, double y1, double x2, double y2) { return create<Line>(x1, y1, x2, y2); }
-  Polyline& polyline(const Points& pts) { return create<Polyline>(pts); }
-  Polygon& polygon(const Points& pts) { return create<Polygon>(pts); }
-  Wedge& wedge(double x, double y, double r1, double r2, double a1, double a2) { return create<Wedge>(x, y, r1, r2, a1, a2); }
+  Circle&    circle(double cx, double cy, double r)                     { return create<Circle>(cx, cy, r); }
+  Ellipse&   ellipse(double cx, double cy, double rx, double ry)        { return create<Ellipse>(cx, cy, rx, ry); }
+  Line&      line(double x1, double y1, double x2, double y2)           { return create<Line>(x1, y1, x2, y2); }
+  Polyline&  polyline(const Points& pts)                                { return create<Polyline>(pts); }
+  Polygon&   polygon(const Points& pts)                                 { return create<Polygon>(pts); }
+  Wedge&     wedge(double x, double y, double r1, double r2, double a1, double a2) { return create<Wedge>(x, y, r1, r2, a1, a2); }
   QuadCurve& quadCurve(double x1, double y1, double cx, double cy, double x2, double y2) { return create<QuadCurve>(x1, y1, cx, cy, x2, y2); }
-  CubicCurve& cubicCurve(double x1, double y1, double cx1, double cy1, double cx2, double cy2, double x2, double y2) { return create<CubicCurve>(x1, y1, cx1, cy1, cx2, cy2, x2, y2); }
+  CubicCurve& cubicCurve(double x1, double y1, double cx1, double cy1, double cx2, double cy2, double x2, double y2) {
+    return create<CubicCurve>(x1, y1, cx1, cy1, cx2, cy2, x2, y2);
+  }
   Text& text(double x, double y, const std::string& t) { return create<Text>(x, y, t); }
   Group& group();
+
+  ShapeContainer& css(const std::string& rule) {
+    styleRules.push_back(rule);
+    return *this;
+  }
+
+  ShapeContainer& keyframes(const std::string& name,
+                            const std::vector<std::string>& steps) {
+    if (hasKeyframes(name)) return *this;
+    std::stringstream ss;
+    ss << "@keyframes " << name << " {\n";
+    for (const auto& s : steps) ss << "    " << s << "\n";
+    ss << "  }";
+    keyframeBlocks.push_back(ss.str());
+    return *this;
+  }
+
+  ShapeContainer& onHover (const std::string& selector, const std::string& decls) { return css(selector + ":hover { "  + decls + " }"); }
+  ShapeContainer& onActive(const std::string& selector, const std::string& decls) { return css(selector + ":active { " + decls + " }"); }
+  ShapeContainer& onFocus (const std::string& selector, const std::string& decls) { return css(selector + ":focus { "  + decls + " }"); }
+  ShapeContainer& onVisited(const std::string& selector, const std::string& decls){ return css(selector + ":visited { "+ decls + " }"); }
+
+  ShapeContainer& transition(const std::string& selector,
+                             const std::string& properties,
+                             double seconds,
+                             const std::string& timing = "ease",
+                             double delay = 0) {
+    std::stringstream ss;
+    ss << selector << " { transition: " << properties << " " << seconds << "s " << timing;
+    if (delay > 0) ss << " " << delay << "s";
+    ss << "; }";
+    styleRules.push_back(ss.str());
+    return *this;
+  }
+
+  ShapeContainer& animate(const std::string& selector,
+                          const std::string& keyframeName,
+                          double duration,
+                          const std::string& timing = "ease",
+                          const std::string& iteration = "infinite",
+                          double delay = 0) {
+    std::stringstream ss;
+    ss << selector << " { animation: " << keyframeName << " " << duration << "s "
+       << timing << " " << iteration;
+    if (delay > 0) ss << " " << delay << "s";
+    ss << "; }";
+    styleRules.push_back(ss.str());
+    return *this;
+  }
+
+  virtual void collectStyles(std::vector<std::string>& out) const {
+    for (const auto& k : keyframeBlocks) out.push_back(k);
+    for (const auto& r : styleRules)      out.push_back(r);
+    for (const auto& s : shapes)          s->collectStyles(out);
+  }
 };
 
+// ---------------------------------------------------------------------------
+// Group
+// ---------------------------------------------------------------------------
 class Group : public Shape, public ShapeContainer {
 public:
   Group() = default;
@@ -323,24 +478,43 @@ public:
     b << "\n";
     return tag("g", "", false, false, b.str());
   }
+
+  void collectStyles(std::vector<std::string>& out) const override {
+    Shape::collectStyles(out);
+    ShapeContainer::collectStyles(out);
+  }
 };
 
 inline Group& ShapeContainer::group() { return create<Group>(); }
 
+// ---------------------------------------------------------------------------
+// Svg
+// ---------------------------------------------------------------------------
 class Svg : public ShapeContainer {
 private:
   double width, height;
 public:
-  static constexpr const char* BUTT = "butt";
-  static constexpr const char* ROUND = "round";
+  static constexpr const char* BUTT   = "butt";
+  static constexpr const char* ROUND  = "round";
   static constexpr const char* SQUARE = "square";
 
   Svg(double width, double height) : width(width), height(height) {}
 
   std::string toString() const {
+    std::vector<std::string> rules;
+    collectStyles(rules);
+
     std::stringstream ss;
     ss << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-    ss << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" << width << "\" height=\"" << height << "\">\n";
+    ss << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" << width
+       << "\" height=\"" << height << "\">\n";
+
+    if (!rules.empty()) {
+      ss << "<style>\n";
+      for (const auto& r : rules) ss << "  " << r << "\n";
+      ss << "</style>\n";
+    }
+
     for (const auto& shape : shapes) {
       ss << "  " << shape->toSVG() << "\n";
     }
