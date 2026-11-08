@@ -11,7 +11,8 @@
 #include <algorithm>
 #include <stdexcept>
 #include <fstream>
-#include <map>
+#include <charconv>
+#include <initializer_list>
 
 namespace SVG {
 
@@ -19,12 +20,38 @@ using Points = std::vector<std::pair<double, double>>;
 
 constexpr double PI = 3.14159265358979323846;
 
-// ---------------------------------------------------------------------------
-// Color
-// ---------------------------------------------------------------------------
+inline std::string num(double v) {
+  if (!std::isfinite(v)) throw std::invalid_argument("SVG::num: NaN or infinite value");
+  char buf[400];
+  auto r = std::to_chars(buf, buf + sizeof buf, v, std::chars_format::fixed, 2);
+  std::string s(buf, r.ptr);
+  if (s.find('.') != std::string::npos) {
+    while (s.back() == '0') s.pop_back();
+    if (s.back() == '.') s.pop_back();
+  }
+  return s == "-0" ? "0" : s;
+}
+
+inline std::string esc(const std::string& s) {
+  std::string o;
+  o.reserve(s.size());
+  for (char c : s) {
+    switch (c) {
+      case '&': o += "&amp;"; break;
+      case '<': o += "&lt;"; break;
+      case '>': o += "&gt;"; break;
+      case '"': o += "&quot;"; break;
+      case '\'': o += "&apos;"; break;
+      default: o += c;
+    }
+  }
+  return o;
+}
+
 struct Color {
   int r, g, b;
-  Color(int r = 0, int g = 0, int b = 0) : r(r), g(g), b(b) {}
+  static int clamp(int v) { return std::min(255, std::max(0, v)); }
+  Color(int r_ = 0, int g_ = 0, int b_ = 0) : r(clamp(r_)), g(clamp(g_)), b(clamp(b_)) {}
   Color(const std::string& hex) {
     std::string h = hex;
     if (h.size() > 1 && h[0] == '#') h = h.substr(1);
@@ -39,278 +66,164 @@ struct Color {
   static Color hex(unsigned int rgb) { return Color((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF); }
   std::string toHex() const {
     std::stringstream ss;
-    ss << "#" << std::hex << std::setfill('0')
-       << std::setw(2) << r
-       << std::setw(2) << g
-       << std::setw(2) << b;
+    ss << "#" << std::hex << std::setfill('0') << std::setw(2) << r << std::setw(2) << g << std::setw(2) << b;
     return ss.str();
   }
 };
 
-// ---------------------------------------------------------------------------
-// Stroke
-// ---------------------------------------------------------------------------
 struct Stroke {
   double width{1.0};
   std::string dashArray{};
   std::string cap{};
+  std::string join{};
   std::string toString() const {
-    std::stringstream ss;
-    ss << "stroke-width=\"" << width << "\" ";
-    if (!dashArray.empty()) ss << "stroke-dasharray=\"" << dashArray << "\" ";
-    if (!cap.empty()) ss << "stroke-linecap=\"" << cap << "\" ";
-    return ss.str();
+    std::string s = " stroke-width=\"" + num(width) + "\"";
+    if (!dashArray.empty()) s += " stroke-dasharray=\"" + esc(dashArray) + "\"";
+    if (!cap.empty()) s += " stroke-linecap=\"" + esc(cap) + "\"";
+    if (!join.empty()) s += " stroke-linejoin=\"" + esc(join) + "\"";
+    return s;
   }
 };
 
-// ---------------------------------------------------------------------------
-// Transform
-// ---------------------------------------------------------------------------
 struct Transform {
   std::string value;
   Transform() = default;
   Transform(const std::string& v) : value(v) {}
-  static Transform translate(double x, double y) {
-    std::stringstream ss; ss << "translate(" << x << "," << y << ")"; return Transform(ss.str());
-  }
-  static Transform scale(double sx, double sy) {
-    std::stringstream ss; ss << "scale(" << sx << "," << sy << ")"; return Transform(ss.str());
-  }
+  static Transform translate(double x, double y) { return Transform("translate(" + num(x) + "," + num(y) + ")"); }
+  static Transform scale(double sx, double sy) { return Transform("scale(" + num(sx) + "," + num(sy) + ")"); }
   static Transform rotate(double angle, double cx = 0, double cy = 0) {
-    std::stringstream ss; ss << "rotate(" << angle;
-    if (cx != 0 || cy != 0) ss << "," << cx << "," << cy;
-    ss << ")"; return Transform(ss.str());
+    std::string s = "rotate(" + num(angle);
+    if (cx != 0 || cy != 0) s += "," + num(cx) + "," + num(cy);
+    return Transform(s + ")");
   }
-  static Transform skewX(double angle) { std::stringstream ss; ss << "skewX(" << angle << ")"; return Transform(ss.str()); }
-  static Transform skewY(double angle) { std::stringstream ss; ss << "skewY(" << angle << ")"; return Transform(ss.str()); }
+  static Transform skewX(double angle) { return Transform("skewX(" + num(angle) + ")"); }
+  static Transform skewY(double angle) { return Transform("skewY(" + num(angle) + ")"); }
   Transform combine(const Transform& t) const { return Transform(value + " " + t.value); }
   std::string toString() const { return value; }
 };
 
-class Shape;
-class ShapeContainer;
-class Group;
-
-// ---------------------------------------------------------------------------
-// Shape
-// ---------------------------------------------------------------------------
 class Shape {
-  friend class ShapeContainer;
 protected:
   Color fillColor;
   Color strokeColor;
   bool hasFill{true};
   bool hasStroke{false};
+  bool fillSet{false};
+  bool strokeSet{false};
   Stroke strokeStyle;
-  std::string xform;
+  double alpha{-1};
+  std::string xform, idv, clsv, extra;
 
-  std::string cssClass;
-  std::string idAttr;
-
-  mutable std::vector<std::string> pendingRules;
-
-  std::string tag(const std::string& name, const std::string& attrs, bool useFill = true,
-                  bool useStroke = true, const std::string& body = "") const {
+  std::string tag(const std::string& name, const std::string& attrs, bool useFill = true, bool useStroke = true, const std::string& body = "") const {
     std::stringstream ss;
     ss << "<" << name << attrs;
-    if (!idAttr.empty())   ss << " id=\""    << idAttr   << "\"";
-    if (!cssClass.empty()) ss << " class=\"" << cssClass << "\"";
-    if (useFill) ss << (hasFill ? " fill=\"" + fillColor.toHex() + "\"" : " fill=\"none\"");
-    if (useStroke && hasStroke) ss << " stroke=\"" << strokeColor.toHex() << "\" " << strokeStyle.toString();
-    if (!xform.empty()) ss << " transform=\"" << xform << "\"";
+    if (!idv.empty()) ss << " id=\"" << esc(idv) << "\"";
+    if (!clsv.empty()) ss << " class=\"" << esc(clsv) << "\"";
+    if (useFill && fillSet) ss << (hasFill ? " fill=\"" + fillColor.toHex() + "\"" : " fill=\"none\"");
+    if (useStroke && strokeSet) {
+      if (hasStroke) ss << " stroke=\"" << strokeColor.toHex() << "\"" << strokeStyle.toString();
+      else ss << " stroke=\"none\"";
+    }
+    if (alpha >= 0) ss << " opacity=\"" << num(alpha) << "\"";
+    ss << extra;
+    if (!xform.empty()) ss << " transform=\"" << esc(xform) << "\"";
     if (body.empty()) ss << "/>"; else ss << ">" << body << "</" << name << ">";
     return ss.str();
   }
-
-  void addClassDeclaration(const std::string& declarations) const {
-    std::string cls = cssClass;
-    if (cls.empty()) {
-      cls = "s" + std::to_string(reinterpret_cast<std::uintptr_t>(this));
-      const_cast<Shape*>(this)->cssClass = cls;
-    }
-    pendingRules.push_back("." + cls + " { " + declarations + " }");
-  }
-
 public:
   virtual ~Shape() = default;
-
-  Shape& fill(const Color& c) { fillColor = c; hasFill = true; return *this; }
-  Shape& noFill() { hasFill = false; return *this; }
-  Shape& stroke(const Color& c) { strokeColor = c; hasStroke = true; return *this; }
-  Shape& stroke(double width, const std::string& dashArray = "") { strokeStyle = Stroke{width, dashArray}; hasStroke = true; return *this; }
-  Shape& noStroke() { hasStroke = false; return *this; }
-  Shape& cap(const std::string& c) { strokeStyle.cap = c; hasStroke = true; return *this; }
-
-  Shape& transform(const std::string& t) { xform = t; return *this; }
-  Shape& transform(const Transform& t) { return transform(t.toString()); }
-  Shape& addTransform(const Transform& t) { return transform(xform.empty() ? t.toString() : xform + " " + t.toString()); }
-  Shape& translate(double x, double y) { return addTransform(Transform::translate(x, y)); }
-  Shape& rotate(double angle, double cx = 0, double cy = 0) { return addTransform(Transform::rotate(angle, cx, cy)); }
-  Shape& scale(double sx, double sy) { return addTransform(Transform::scale(sx, sy)); }
-  Shape& skewX(double angle) { return addTransform(Transform::skewX(angle)); }
-  Shape& skewY(double angle) { return addTransform(Transform::skewY(angle)); }
-
-  Shape& className(const std::string& c) { cssClass = c; return *this; }
-  Shape& idName(const std::string& i)    { idAttr = i;   return *this; }
-  const std::string& getClass() const    { return cssClass; }
-  const std::string& getId() const       { return idAttr;   }
-
-  Shape& cssOpacity(double o) {
-    std::stringstream ss; ss << "opacity: " << o << ";";
-    addClassDeclaration(ss.str());
-    return *this;
-  }
-
-  Shape& transition(const std::string& properties, double seconds,
-                    const std::string& timing = "ease", double delay = 0) {
-    std::stringstream ss;
-    ss << "transition: " << properties << " " << seconds << "s " << timing;
-    if (delay > 0) ss << " " << delay << "s";
-    ss << ";";
-    addClassDeclaration(ss.str());
-    return *this;
-  }
-
-  Shape& cssTransform(const std::string& expr) {
-    addClassDeclaration("transform: " + expr + ";");
-    return *this;
-  }
-
-  Shape& cssTransformOrigin(double x, double y) {
-    std::stringstream ss;
-    ss << "transform-origin: " << x << "px " << y << "px;";
-    addClassDeclaration(ss.str());
-    return *this;
-  }
-
-  Shape& css(const std::string& declarations) {
-    addClassDeclaration(declarations);
-    return *this;
-  }
-
-  Shape& animate(const std::string& keyframeName,
-                 double duration,
-                 const std::string& timing = "ease",
-                 const std::string& iteration = "infinite",
-                 double delay = 0,
-                 const std::string& direction = "",
-                 const std::string& fillMode = "") {
-    std::stringstream ss;
-    ss << "animation: " << keyframeName << " " << duration << "s " << timing
-       << " " << iteration;
-    if (delay > 0)        ss << " " << delay << "s";
-    if (!direction.empty()) ss << " " << direction;
-    if (!fillMode.empty())  ss << " " << fillMode;
-    ss << ";";
-    addClassDeclaration(ss.str());
-    return *this;
-  }
-
-  Shape& animateTransform(const std::string& keyframeName,
-                          double duration,
-                          const std::string& timing = "ease",
-                          const std::string& iteration = "infinite") {
-    return animate(keyframeName, duration, timing, iteration);
-  }
-
   virtual std::string toSVG() const = 0;
-  virtual void collectStyles(std::vector<std::string>& out) const {
-    for (const auto& r : pendingRules) out.push_back(r);
-  }
-
-  static std::string sel(const std::string& cls)   { return "." + cls; }
-  static std::string id (const std::string& ident) { return "#" + ident; }
-  static std::string hover (const std::string& s)  { return s + ":hover";  }
-  static std::string active(const std::string& s)  { return s + ":active"; }
-  static std::string focus (const std::string& s)  { return s + ":focus";  }
 };
 
-class Rectangle : public Shape {
-private:
+template <class D>
+class ShapeT : public Shape {
+  D& self() { return static_cast<D&>(*this); }
+public:
+  D& fill(const Color& c) { fillColor = c; hasFill = true; fillSet = true; return self(); }
+  D& noFill() { hasFill = false; fillSet = true; return self(); }
+  D& stroke(const Color& c) { strokeColor = c; hasStroke = true; strokeSet = true; return self(); }
+  D& stroke(double width, const std::string& dashArray = "") { strokeStyle.width = width; strokeStyle.dashArray = dashArray; hasStroke = true; strokeSet = true; return self(); }
+  D& noStroke() { hasStroke = false; strokeSet = true; return self(); }
+  D& cap(const std::string& c) { strokeStyle.cap = c; hasStroke = true; strokeSet = true; return self(); }
+  D& join(const std::string& j) { strokeStyle.join = j; hasStroke = true; strokeSet = true; return self(); }
+  D& opacity(double a) { alpha = a; return self(); }
+  D& id(const std::string& v) { idv = v; return self(); }
+  D& cls(const std::string& v) { clsv = v; return self(); }
+  D& attr(const std::string& name, const std::string& value) { extra += " " + name + "=\"" + esc(value) + "\""; return self(); }
+  D& transform(const std::string& t) { xform = t; return self(); }
+  D& transform(const Transform& t) { return transform(t.toString()); }
+  D& addTransform(const Transform& t) { return transform(xform.empty() ? t.toString() : xform + " " + t.toString()); }
+  D& translate(double x, double y) { return addTransform(Transform::translate(x, y)); }
+  D& rotate(double angle, double cx = 0, double cy = 0) { return addTransform(Transform::rotate(angle, cx, cy)); }
+  D& scale(double sx, double sy) { return addTransform(Transform::scale(sx, sy)); }
+  D& skewX(double angle) { return addTransform(Transform::skewX(angle)); }
+  D& skewY(double angle) { return addTransform(Transform::skewY(angle)); }
+};
+
+class Rectangle : public ShapeT<Rectangle> {
   double x, y, width, height, rx;
 public:
-  Rectangle(double x, double y, double width, double height, double rx = 0)
-    : x(x), y(y), width(width), height(height), rx(rx) {}
-
+  Rectangle(double x, double y, double width, double height, double rx = 0) : x(x), y(y), width(width), height(height), rx(rx) {}
   std::string toSVG() const override {
-    std::stringstream a;
-    a << " x=\"" << x << "\" y=\"" << y << "\" width=\"" << width << "\" height=\"" << height << "\"";
-    if (rx > 0) a << " rx=\"" << rx << "\" ry=\"" << rx << "\"";
-    return tag("rect", a.str());
+    std::string a = " x=\"" + num(x) + "\" y=\"" + num(y) + "\" width=\"" + num(width) + "\" height=\"" + num(height) + "\"";
+    if (rx > 0) a += " rx=\"" + num(rx) + "\" ry=\"" + num(rx) + "\"";
+    return tag("rect", a);
   }
 };
 
-class Circle : public Shape {
-private:
+class Circle : public ShapeT<Circle> {
   double cx, cy, r;
 public:
   Circle(double cx, double cy, double r) : cx(cx), cy(cy), r(r) {}
   std::string toSVG() const override {
-    std::stringstream a;
-    a << " cx=\"" << cx << "\" cy=\"" << cy << "\" r=\"" << r << "\"";
-    return tag("circle", a.str());
+    return tag("circle", " cx=\"" + num(cx) + "\" cy=\"" + num(cy) + "\" r=\"" + num(r) + "\"");
   }
 };
 
-class Ellipse : public Shape {
-private:
+class Ellipse : public ShapeT<Ellipse> {
   double cx, cy, rx, ry;
 public:
   Ellipse(double cx, double cy, double rx, double ry) : cx(cx), cy(cy), rx(rx), ry(ry) {}
   std::string toSVG() const override {
-    std::stringstream a;
-    a << " cx=\"" << cx << "\" cy=\"" << cy << "\" rx=\"" << rx << "\" ry=\"" << ry << "\"";
-    return tag("ellipse", a.str());
+    return tag("ellipse", " cx=\"" + num(cx) + "\" cy=\"" + num(cy) + "\" rx=\"" + num(rx) + "\" ry=\"" + num(ry) + "\"");
   }
 };
 
-class Line : public Shape {
-private:
+class Line : public ShapeT<Line> {
   double x1, y1, x2, y2;
 public:
-  Line(double x1, double y1, double x2, double y2) : x1(x1), y1(y1), x2(x2), y2(y2) {
-    stroke(Color(0, 0, 0));
-  }
+  Line(double x1, double y1, double x2, double y2) : x1(x1), y1(y1), x2(x2), y2(y2) { stroke(Color(0, 0, 0)); }
   std::string toSVG() const override {
-    std::stringstream a;
-    a << " x1=\"" << x1 << "\" y1=\"" << y1 << "\" x2=\"" << x2 << "\" y2=\"" << y2 << "\"";
-    return tag("line", a.str(), false);
+    return tag("line", " x1=\"" + num(x1) + "\" y1=\"" + num(y1) + "\" x2=\"" + num(x2) + "\" y2=\"" + num(y2) + "\"", false);
   }
 };
 
-class Polyline : public Shape {
+class Polyline : public ShapeT<Polyline> {
 protected:
   Points points;
   std::string pointsAttr() const {
-    std::stringstream ss;
-    ss << " points=\"";
-    for (size_t i = 0; i < points.size(); ++i) {
-      if (i > 0) ss << " ";
-      ss << points[i].first << "," << points[i].second;
-    }
-    ss << "\"";
-    return ss.str();
+    std::string s = " points=\"";
+    for (size_t i = 0; i < points.size(); ++i) s += (i ? " " : "") + num(points[i].first) + "," + num(points[i].second);
+    return s + "\"";
   }
 public:
   Polyline() { noFill(); }
   Polyline(const Points& pts) : points(pts) { noFill(); }
-  void addPoint(double x, double y) { points.emplace_back(x, y); }
+  Polyline& addPoint(double x, double y) { points.emplace_back(x, y); return *this; }
   std::string toSVG() const override { return tag("polyline", pointsAttr()); }
 };
 
 class Polygon : public Polyline {
 public:
-  Polygon() { fill(Color(0, 0, 0)); }
-  Polygon(const Points& pts) : Polyline(pts) { fill(Color(0, 0, 0)); }
+  Polygon() { fillSet = false; }
+  Polygon(const Points& pts) : Polyline(pts) { fillSet = false; }
   std::string toSVG() const override { return tag("polygon", pointsAttr()); }
 };
 
 class Wedge : public Polygon {
 public:
   Wedge(double x, double y, double r1, double r2, double a1, double a2, int segments = 48) {
-    fill(Color(0, 0, 0));
-    double rad1 = a1 * PI / 180.0;
-    double rad2 = a2 * PI / 180.0;
+    double rad1 = a1 * PI / 180.0, rad2 = a2 * PI / 180.0;
     for (int i = 0; i <= segments; ++i) {
       double a = rad1 + (rad2 - rad1) * (static_cast<double>(i) / segments);
       addPoint(x + r2 * std::cos(a), y + r2 * std::sin(a));
@@ -330,8 +243,7 @@ class QuadCurve : public Polyline {
 public:
   QuadCurve(double x1, double y1, double cx, double cy, double x2, double y2, int segments = 32) {
     for (int i = 0; i <= segments; ++i) {
-      double t = static_cast<double>(i) / segments;
-      double mt = 1 - t;
+      double t = static_cast<double>(i) / segments, mt = 1 - t;
       addPoint(mt * mt * x1 + 2 * mt * t * cx + t * t * x2, mt * mt * y1 + 2 * mt * t * cy + t * t * y2);
     }
   }
@@ -341,54 +253,69 @@ class CubicCurve : public Polyline {
 public:
   CubicCurve(double x1, double y1, double cx1, double cy1, double cx2, double cy2, double x2, double y2, int segments = 32) {
     for (int i = 0; i <= segments; ++i) {
-      double t = static_cast<double>(i) / segments;
-      double mt = 1 - t;
-      double x = mt * mt * mt * x1 + 3 * mt * mt * t * cx1 + 3 * mt * t * t * cx2 + t * t * t * x2;
-      double y = mt * mt * mt * y1 + 3 * mt * mt * t * cy1 + 3 * mt * t * t * cy2 + t * t * t * y2;
-      addPoint(x, y);
+      double t = static_cast<double>(i) / segments, mt = 1 - t;
+      addPoint(mt * mt * mt * x1 + 3 * mt * mt * t * cx1 + 3 * mt * t * t * cx2 + t * t * t * x2,
+               mt * mt * mt * y1 + 3 * mt * mt * t * cy1 + 3 * mt * t * t * cy2 + t * t * t * y2);
     }
   }
 };
 
-class Text : public Shape {
-private:
-  double x, y;
-  std::string text;
-  std::string fontFamily;
-  double fontSize;
+class Path : public ShapeT<Path> {
+  std::string d;
+  Path& cmd(char c, std::initializer_list<double> v) {
+    if (!d.empty()) d += ' ';
+    d += c;
+    for (double x : v) d += " " + num(x);
+    return *this;
+  }
 public:
-  Text(double x, double y, const std::string& text) : x(x), y(y), text(text), fontSize(12) {}
+  Path() { noFill(); }
+  explicit Path(const std::string& data) : d(data) { noFill(); }
+  Path& moveTo(double x, double y) { return cmd('M', {x, y}); }
+  Path& lineTo(double x, double y) { return cmd('L', {x, y}); }
+  Path& quadTo(double cx, double cy, double x, double y) { return cmd('Q', {cx, cy, x, y}); }
+  Path& curveTo(double cx1, double cy1, double cx2, double cy2, double x, double y) { return cmd('C', {cx1, cy1, cx2, cy2, x, y}); }
+  Path& arcTo(double rx, double ry, double rotation, bool large, bool sweep, double x, double y) { return cmd('A', {rx, ry, rotation, large ? 1.0 : 0.0, sweep ? 1.0 : 0.0, x, y}); }
+  Path& close() { if (!d.empty()) d += " Z"; return *this; }
+  std::string toSVG() const override { return tag("path", " d=\"" + esc(d) + "\""); }
+};
+
+class Text : public ShapeT<Text> {
+  double x, y, fontSize{12};
+  std::string content, fontFamily, anchorv, weight, fontStyle;
+public:
+  Text(double x, double y, const std::string& text) : x(x), y(y), content(text) {}
   Text& font(const std::string& family, double size) { fontFamily = family; fontSize = size; return *this; }
+  Text& anchor(const std::string& a) { anchorv = a; return *this; }       // start, middle, end
+  Text& bold(bool b = true) { weight = b ? "bold" : ""; return *this; }
+  Text& italic(bool i = true) { fontStyle = i ? "italic" : ""; return *this; }
   std::string toSVG() const override {
-    std::stringstream a;
-    a << " x=\"" << x << "\" y=\"" << y << "\"";
-    if (!fontFamily.empty()) a << " font-family=\"" << fontFamily << "\"";
-    if (fontSize > 0) a << " font-size=\"" << fontSize << "\"";
-    return tag("text", a.str(), true, false, text);
+    std::string a = " x=\"" + num(x) + "\" y=\"" + num(y) + "\"";
+    if (!fontFamily.empty()) a += " font-family=\"" + esc(fontFamily) + "\"";
+    if (fontSize > 0) a += " font-size=\"" + num(fontSize) + "\"";
+    if (!anchorv.empty()) a += " text-anchor=\"" + esc(anchorv) + "\"";
+    if (!weight.empty()) a += " font-weight=\"" + weight + "\"";
+    if (!fontStyle.empty()) a += " font-style=\"" + fontStyle + "\"";
+    return tag("text", a, true, true, esc(content));
   }
 };
 
-// ---------------------------------------------------------------------------
-// ShapeContainer
-// ---------------------------------------------------------------------------
+class Raw : public Shape {
+  std::string markup;
+public:
+  explicit Raw(const std::string& s) : markup(s) {}
+  std::string toSVG() const override { return markup; }
+};
+
+class Group;
+
 class ShapeContainer {
 protected:
   std::vector<std::shared_ptr<Shape>> shapes;
-  std::vector<std::string> styleRules;
-  std::vector<std::string> keyframeBlocks;
-  bool hasKeyframes(const std::string& name) const {
-    for (const auto& k : keyframeBlocks) {
-      if (k.find("@keyframes " + name) != std::string::npos) return true;
-    }
-    return false;
-  }
-
 public:
-  virtual ~ShapeContainer() = default;
-
-  template <typename ShapeT, typename... Args>
-  ShapeT& create(Args&&... args) {
-    auto s = std::make_shared<ShapeT>(std::forward<Args>(args)...);
+  template <typename ShapeT_, typename... Args>
+  ShapeT_& create(Args&&... args) {
+    auto s = std::make_shared<ShapeT_>(std::forward<Args>(args)...);
     shapes.push_back(s);
     return *s;
   }
@@ -396,134 +323,64 @@ public:
   ShapeContainer& add(std::shared_ptr<Shape> shape) { shapes.push_back(shape); return *this; }
 
   Rectangle& rect(double x, double y, double w, double h, double rx = 0) { return create<Rectangle>(x, y, w, h, rx); }
-  Circle&    circle(double cx, double cy, double r)                     { return create<Circle>(cx, cy, r); }
-  Ellipse&   ellipse(double cx, double cy, double rx, double ry)        { return create<Ellipse>(cx, cy, rx, ry); }
-  Line&      line(double x1, double y1, double x2, double y2)           { return create<Line>(x1, y1, x2, y2); }
-  Polyline&  polyline(const Points& pts)                                { return create<Polyline>(pts); }
-  Polygon&   polygon(const Points& pts)                                 { return create<Polygon>(pts); }
-  Wedge&     wedge(double x, double y, double r1, double r2, double a1, double a2) { return create<Wedge>(x, y, r1, r2, a1, a2); }
+  Circle& circle(double cx, double cy, double r) { return create<Circle>(cx, cy, r); }
+  Ellipse& ellipse(double cx, double cy, double rx, double ry) { return create<Ellipse>(cx, cy, rx, ry); }
+  Line& line(double x1, double y1, double x2, double y2) { return create<Line>(x1, y1, x2, y2); }
+  Polyline& polyline(const Points& pts) { return create<Polyline>(pts); }
+  Polygon& polygon(const Points& pts) { return create<Polygon>(pts); }
+  Wedge& wedge(double x, double y, double r1, double r2, double a1, double a2) { return create<Wedge>(x, y, r1, r2, a1, a2); }
   QuadCurve& quadCurve(double x1, double y1, double cx, double cy, double x2, double y2) { return create<QuadCurve>(x1, y1, cx, cy, x2, y2); }
-  CubicCurve& cubicCurve(double x1, double y1, double cx1, double cy1, double cx2, double cy2, double x2, double y2) {
-    return create<CubicCurve>(x1, y1, cx1, cy1, cx2, cy2, x2, y2);
-  }
+  CubicCurve& cubicCurve(double x1, double y1, double cx1, double cy1, double cx2, double cy2, double x2, double y2) { return create<CubicCurve>(x1, y1, cx1, cy1, cx2, cy2, x2, y2); }
+  Path& path() { return create<Path>(); }
+  Path& path(const std::string& d) { return create<Path>(d); }
   Text& text(double x, double y, const std::string& t) { return create<Text>(x, y, t); }
+  Raw& raw(const std::string& markup) { return create<Raw>(markup); }
   Group& group();
-
-  ShapeContainer& css(const std::string& rule) {
-    styleRules.push_back(rule);
-    return *this;
-  }
-
-  ShapeContainer& keyframes(const std::string& name,
-                            const std::vector<std::string>& steps) {
-    if (hasKeyframes(name)) return *this;
-    std::stringstream ss;
-    ss << "@keyframes " << name << " {\n";
-    for (const auto& s : steps) ss << "    " << s << "\n";
-    ss << "  }";
-    keyframeBlocks.push_back(ss.str());
-    return *this;
-  }
-
-  ShapeContainer& onHover (const std::string& selector, const std::string& decls) { return css(selector + ":hover { "  + decls + " }"); }
-  ShapeContainer& onActive(const std::string& selector, const std::string& decls) { return css(selector + ":active { " + decls + " }"); }
-  ShapeContainer& onFocus (const std::string& selector, const std::string& decls) { return css(selector + ":focus { "  + decls + " }"); }
-  ShapeContainer& onVisited(const std::string& selector, const std::string& decls){ return css(selector + ":visited { "+ decls + " }"); }
-
-  ShapeContainer& transition(const std::string& selector,
-                             const std::string& properties,
-                             double seconds,
-                             const std::string& timing = "ease",
-                             double delay = 0) {
-    std::stringstream ss;
-    ss << selector << " { transition: " << properties << " " << seconds << "s " << timing;
-    if (delay > 0) ss << " " << delay << "s";
-    ss << "; }";
-    styleRules.push_back(ss.str());
-    return *this;
-  }
-
-  ShapeContainer& animate(const std::string& selector,
-                          const std::string& keyframeName,
-                          double duration,
-                          const std::string& timing = "ease",
-                          const std::string& iteration = "infinite",
-                          double delay = 0) {
-    std::stringstream ss;
-    ss << selector << " { animation: " << keyframeName << " " << duration << "s "
-       << timing << " " << iteration;
-    if (delay > 0) ss << " " << delay << "s";
-    ss << "; }";
-    styleRules.push_back(ss.str());
-    return *this;
-  }
-
-  virtual void collectStyles(std::vector<std::string>& out) const {
-    for (const auto& k : keyframeBlocks) out.push_back(k);
-    for (const auto& r : styleRules)      out.push_back(r);
-    for (const auto& s : shapes)          s->collectStyles(out);
-  }
 };
 
-// ---------------------------------------------------------------------------
-// Group
-// ---------------------------------------------------------------------------
-class Group : public Shape, public ShapeContainer {
+class Group : public ShapeT<Group>, public ShapeContainer {
 public:
-  Group() = default;
-
   std::string toSVG() const override {
-    std::stringstream b;
-    for (const auto& shape : shapes) b << "\n  " << shape->toSVG();
-    b << "\n";
-    return tag("g", "", false, false, b.str());
-  }
-
-  void collectStyles(std::vector<std::string>& out) const override {
-    Shape::collectStyles(out);
-    ShapeContainer::collectStyles(out);
+    std::string b;
+    for (const auto& shape : shapes) b += "\n  " + shape->toSVG();
+    return tag("g", "", true, true, b + "\n");
   }
 };
 
 inline Group& ShapeContainer::group() { return create<Group>(); }
 
-// ---------------------------------------------------------------------------
-// Svg
-// ---------------------------------------------------------------------------
 class Svg : public ShapeContainer {
-private:
   double width, height;
+  std::string viewBoxAttr, titleText, css, defsMarkup;
 public:
-  static constexpr const char* BUTT   = "butt";
-  static constexpr const char* ROUND  = "round";
+  static constexpr const char* BUTT = "butt";
+  static constexpr const char* ROUND = "round";
   static constexpr const char* SQUARE = "square";
 
   Svg(double width, double height) : width(width), height(height) {}
 
+  Svg& viewBox(double x, double y, double w, double h) { viewBoxAttr = num(x) + " " + num(y) + " " + num(w) + " " + num(h); return *this; }
+  Svg& title(const std::string& t) { titleText = t; return *this; }
+  Svg& style(const std::string& cssText) { css = cssText; return *this; }        // CSS as it is, goes in <style>
+  Svg& defs(const std::string& markup) { defsMarkup = markup; return *this; }    // markup as it is, goes in <defs>
+
   std::string toString() const {
-    std::vector<std::string> rules;
-    collectStyles(rules);
-
-    std::stringstream ss;
-    ss << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-    ss << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" << width
-       << "\" height=\"" << height << "\">\n";
-
-    if (!rules.empty()) {
-      ss << "<style>\n";
-      for (const auto& r : rules) ss << "  " << r << "\n";
-      ss << "</style>\n";
-    }
-
-    for (const auto& shape : shapes) {
-      ss << "  " << shape->toSVG() << "\n";
-    }
-    ss << "</svg>";
-    return ss.str();
+    std::string s = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" + num(width) + "\" height=\"" + num(height) + "\"";
+    if (!viewBoxAttr.empty()) s += " viewBox=\"" + viewBoxAttr + "\"";
+    s += ">\n";
+    if (!titleText.empty()) s += "  <title>" + esc(titleText) + "</title>\n";
+    if (!css.empty()) s += "  <style><![CDATA[\n" + css + "\n  ]]></style>\n";
+    if (!defsMarkup.empty()) s += "  <defs>" + defsMarkup + "</defs>\n";
+    for (const auto& shape : shapes) s += "  " + shape->toSVG() + "\n";
+    return s + "</svg>";
   }
 
   void save(const std::string& filename) const {
-    std::ofstream(filename) << toString();
+    std::ofstream f(filename);
+    if (!f) throw std::runtime_error("Svg::save: cannot open \"" + filename + "\"");
+    f << toString();
+    f.flush();
+    if (!f) throw std::runtime_error("Svg::save: error writing \"" + filename + "\"");
   }
 };
 
